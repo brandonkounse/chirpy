@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
+	"unicode"
 )
 
 type apiConfig struct {
@@ -45,6 +47,29 @@ type Chirp struct {
 	Body string `json:"body"`
 }
 
+func sanitizeChirp(chirp string) string {
+	profane := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
+
+	words := strings.Split(chirp, " ")
+	for i, word := range words {
+		if strings.ContainsFunc(word, unicode.IsPunct) {
+			continue
+		}
+		if _, ok := profane[strings.ToLower(word)]; ok {
+			words[i] = "****"
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+type cleanedResponse struct {
+	CleanedBody string `json:"cleaned_body"`
+}
+
 func validateChirp(w http.ResponseWriter, r *http.Request) {
 	c := Chirp{}
 	decoder := json.NewDecoder(r.Body)
@@ -60,9 +85,16 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	data, err := json.Marshal(cleanedResponse{CleanedBody: sanitizeChirp(c.Body)})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Something went wrong"))
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"valid": true}`))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func main() {

@@ -12,12 +12,15 @@ import (
 	"unicode"
 
 	"github.com/brandonkounse/chirpy/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) addMetrics(next http.Handler) http.Handler {
@@ -40,8 +43,17 @@ func (cfg *apiConfig) getMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(metrics))
 }
 
-func (cfg *apiConfig) resetMetrics(_ http.ResponseWriter, _ *http.Request) {
-	cfg.fileserverHits.Store(0)
+func (cfg *apiConfig) resetDatabase(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	err := cfg.dbQueries.DeleteUsers(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func healthzHandler(w http.ResponseWriter, _ *http.Request) {
@@ -84,6 +96,7 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("Something went wrong"))
+		return
 	}
 
 	if len([]rune(c.Body)) > 140 {
@@ -104,8 +117,51 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+type createUserRequest struct {
+	Email string `json:"email"`
+}
+
+type createUserResponse struct {
+	Id        uuid.UUID `json:"id"`
+	CreatedAt string    `json:"created_at"`
+	UpdatedAt string    `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
+	var req createUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	if err != nil {
+		http.Error(w, "error creating user", http.StatusInternalServerError)
+		return
+	}
+
+	res := createUserResponse{
+		Id:        user.ID,
+		CreatedAt: user.CreatedAt.String(),
+		UpdatedAt: user.UpdatedAt.String(),
+		Email:     user.Email,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(res); err != nil {
+		http.Error(w, "error encoding response", http.StatusInternalServerError)
+	}
+}
+
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("no .env loaded: %v", err)
+	}
 	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatal(err)
@@ -115,6 +171,7 @@ func main() {
 	mux := http.NewServeMux()
 	api := &apiConfig{
 		dbQueries: dbQueries,
+		platform:  platform,
 	}
 
 	fileServer := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
@@ -122,8 +179,9 @@ func main() {
 	mux.Handle("GET /app/", api.addMetrics(fileServer))
 	mux.HandleFunc("GET /api/healthz", healthzHandler)
 	mux.HandleFunc("GET /admin/metrics", api.getMetrics)
-	mux.HandleFunc("POST /admin/reset", api.resetMetrics)
+	mux.HandleFunc("POST /admin/reset", api.resetDatabase)
 	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	mux.HandleFunc("POST /api/users", api.createUserHandler)
 
 	server := &http.Server{
 		Addr:    ":8080",

@@ -1,16 +1,23 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"unicode"
+
+	"github.com/brandonkounse/chirpy/internal/database"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries      *database.Queries
 }
 
 func (cfg *apiConfig) addMetrics(next http.Handler) http.Handler {
@@ -20,7 +27,7 @@ func (cfg *apiConfig) addMetrics(next http.Handler) http.Handler {
 	})
 }
 
-func (cfg *apiConfig) getMetrics(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) getMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	metrics := fmt.Sprintf(`
 <html>
@@ -33,11 +40,11 @@ func (cfg *apiConfig) getMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(metrics))
 }
 
-func (cfg *apiConfig) resetMetrics(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) resetMetrics(_ http.ResponseWriter, _ *http.Request) {
 	cfg.fileserverHits.Store(0)
 }
 
-func healthzHandler(w http.ResponseWriter, r *http.Request) {
+func healthzHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
@@ -98,8 +105,17 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dbQueries := database.New(db)
+
 	mux := http.NewServeMux()
-	api := &apiConfig{}
+	api := &apiConfig{
+		dbQueries: dbQueries,
+	}
 
 	fileServer := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 

@@ -62,10 +62,6 @@ func healthzHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
-type Chirp struct {
-	Body string `json:"body"`
-}
-
 func sanitizeChirp(chirp string) string {
 	profane := map[string]struct{}{
 		"kerfuffle": {},
@@ -85,12 +81,25 @@ func sanitizeChirp(chirp string) string {
 	return strings.Join(words, " ")
 }
 
-type cleanedResponse struct {
-	CleanedBody string `json:"cleaned_body"`
+//type cleanedResponse struct {
+//	CleanedBody string `json:"cleaned_body"`
+//}
+
+type chirpRequest struct {
+	Body   string    `json:"body"`
+	UserId uuid.UUID `json:"user_id"`
 }
 
-func validateChirp(w http.ResponseWriter, r *http.Request) {
-	c := Chirp{}
+type chirpResponse struct {
+	Id        uuid.UUID `json:"id"`
+	CreatedAt string    `json:"created_at"`
+	UpdatedAt string    `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserId    uuid.UUID `json:"user_id"`
+}
+
+func (cfg *apiConfig) chirpHandler(w http.ResponseWriter, r *http.Request) {
+	c := chirpRequest{}
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&c)
 	if err != nil {
@@ -105,15 +114,31 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := json.Marshal(cleanedResponse{CleanedBody: sanitizeChirp(c.Body)})
+	c.Body = sanitizeChirp(c.Body)
+
+	chirpParams := database.CreateChirpParams{Body: c.Body, UserID: c.UserId}
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), chirpParams)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("Something went wrong"))
+		return
+	}
+
+	res := chirpResponse{
+		Id:        chirp.ID,
+		CreatedAt: chirp.CreatedAt.String(),
+		UpdatedAt: chirp.UpdatedAt.String(),
+		Body:      chirp.Body,
+		UserId:    chirp.UserID,
+	}
+
+	data, err := json.Marshal(res)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write(data)
 }
 
@@ -180,7 +205,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthzHandler)
 	mux.HandleFunc("GET /admin/metrics", api.getMetrics)
 	mux.HandleFunc("POST /admin/reset", api.resetDatabase)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	mux.HandleFunc("POST /api/chirps", api.chirpHandler)
 	mux.HandleFunc("POST /api/users", api.createUserHandler)
 
 	server := &http.Server{

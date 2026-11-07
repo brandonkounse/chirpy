@@ -8,3 +8,13 @@ VALUES (
         $2
        )
 RETURNING *;
+
+-- name: GetChirpsByCreateTime :many
+SELECT *
+FROM chirps
+ORDER BY created_at;
+
+-- name: GetChirpById :one
+SELECT *
+FROM chirps
+WHERE id = $1;

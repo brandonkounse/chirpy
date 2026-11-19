@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"unicode"
 
+	"github.com/brandonkounse/chirpy/internal/auth"
 	"github.com/brandonkounse/chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -80,10 +81,6 @@ func sanitizeChirp(chirp string) string {
 	}
 	return strings.Join(words, " ")
 }
-
-//type cleanedResponse struct {
-//	CleanedBody string `json:"cleaned_body"`
-//}
 
 type chirpRequest struct {
 	Body   string    `json:"body"`
@@ -211,31 +208,43 @@ func (cfg *apiConfig) singleChirp(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-type createUserRequest struct {
-	Email string `json:"email"`
+type userRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
-type createUserResponse struct {
+type userResponse struct {
 	Id        uuid.UUID `json:"id"`
 	CreatedAt string    `json:"created_at"`
 	UpdatedAt string    `json:"updated_at"`
 	Email     string    `json:"email"`
 }
 
-func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
-	var req createUserRequest
+func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
+	var req userRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	user, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	hashedPass, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	userParams := database.CreateUserParams{
+		Email:          req.Email,
+		HashedPassword: hashedPass,
+	}
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), userParams)
 	if err != nil {
 		http.Error(w, "error creating user", http.StatusInternalServerError)
 		return
 	}
 
-	res := createUserResponse{
+	res := userResponse{
 		Id:        user.ID,
 		CreatedAt: user.CreatedAt.String(),
 		UpdatedAt: user.UpdatedAt.String(),
@@ -244,6 +253,45 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(res); err != nil {
+		http.Error(w, "error encoding response", http.StatusInternalServerError)
+	}
+}
+
+func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
+	var req userRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUser(r.Context(), req.Email)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	correctPass, err := auth.CheckPasswordHash(req.Password, user.HashedPassword)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if !correctPass {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("Incorrect email or password"))
+		return
+	}
+
+	res := userResponse{
+		Id:        user.ID,
+		CreatedAt: user.CreatedAt.String(),
+		UpdatedAt: user.UpdatedAt.String(),
+		Email:     user.Email,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(res); err != nil {
 		http.Error(w, "error encoding response", http.StatusInternalServerError)
 	}
@@ -277,7 +325,8 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", api.chirps)
 	mux.HandleFunc("GET /api/chirps", api.chirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", api.singleChirp)
-	mux.HandleFunc("POST /api/users", api.createUserHandler)
+	mux.HandleFunc("POST /api/users", api.createUser)
+	mux.HandleFunc("POST /api/login", api.login)
 
 	server := &http.Server{
 		Addr:    ":8080",
